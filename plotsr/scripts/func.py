@@ -552,6 +552,32 @@ class track():
         self.tt = 'f'
         self.ta = 1
 
+    @staticmethod
+    def _norm_chr_name(c):
+        c = c.strip()
+        if c.lower().startswith('chr'):
+            c = c[3:]
+        if c.isdigit():
+            c = str(int(c))
+        return c.lower()
+
+    @classmethod
+    def _build_chr_alias(cls, chrs):
+        alias = {}
+        for c in chrs:
+            n = cls._norm_chr_name(c)
+            if n not in alias:
+                alias[n] = c
+            else:
+                alias[n] = None
+        return alias
+
+    @classmethod
+    def _resolve_chr_name(cls, c, chrs, chr_alias):
+        if c in chrs:
+            return c
+        return chr_alias.get(cls._norm_chr_name(c))
+
     # Add tags
     def addtags(self, tags):
         import matplotlib
@@ -616,6 +642,7 @@ class track():
         bw = int(self.bw)
         # Read the BED file
         _chrs = set([c for c in chrlengths[0][1].keys()])
+        chr_alias = self._build_chr_alias(_chrs)
         bincnt = defaultdict(deque)
         skipchrs = []
         curchr = ''
@@ -627,18 +654,19 @@ class track():
                 if len(line) < 3:
                     self.logger.warning("Incomplete information in BED file at line: {}. Skipping it.".format("\t".join(line)))
                     continue
-                if line[0] not in _chrs:
+                bedchr = self._resolve_chr_name(line[0], _chrs, chr_alias)
+                if bedchr is None:
                     if line[0] not in skipchrs:
                         self.logger.info("Chromosome in BED is not present in FASTA or not selected for plotting. Skipping it. BED line: {}".format("\t".join(line)))
                         skipchrs.append(line[0])
                     continue
                 if curchr == '':
-                    curchr = line[0]
+                    curchr = bedchr
                     pos.append([int(line[1]), int(line[2])])
-                elif curchr == line[0]:
+                elif curchr == bedchr:
                     pos.append([int(line[1]), int(line[2])])
                 else:
-                    if line[0] in added_chrs:
+                    if bedchr in added_chrs:
                         self.logger.error("BED file: {} is not sorted. For plotting tracks, sorted bed file is required. Exiting.".format(self.f))
                         sys.exit()
                     if len(pos) > 1:
@@ -652,7 +680,7 @@ class track():
                     bincnt[curchr] = deque([((bins[i] + bins[i+1])/2, binval[i]/bw) for i in range(len(binval))])
                     added_chrs.append(curchr)
                     # Set the new chromosome
-                    curchr = line[0]
+                    curchr = bedchr
                     pos = deque([[int(line[1]), int(line[2])]])
             if len(pos) > 1:
                 rngs = mergeranges(np.array(pos))
@@ -675,6 +703,7 @@ class track():
 
         bw = int(self.bw)
         _chrs = set([c for c in chrlengths[0][1].keys()])
+        chr_alias = self._build_chr_alias(_chrs)
         bincnt = defaultdict(deque)
         skipchrs = []
         curchr = ''
@@ -682,31 +711,36 @@ class track():
         with open(self.f, 'r') as fin:
             for line in fin:
                 line = line.strip().split()
+                if len(line) == 0:
+                    continue
+                if line[0] == '#':
+                    continue
+                if line[0] == 'track':
+                    continue
                 try:
                     val = float(line[3])
-                except ValueError:
+                except (ValueError, IndexError):
                     if len(line) < 4:
                         self.logger.warning("Incomplete information in bedgraph file at line: {}. Skipping it.".format("\t".join(line)))
                         continue
-                if curchr == '':
-                    curchr = line[0]
-                    binv = np.zeros(ceil(chrlengths[0][1][curchr] / bw), dtype=int)
-                    s = deque([int(line[1])])
-                    e = deque([int(line[2])])
-                    v = deque([int(val)])
-                elif curchr == line[0]:
-                    s.append(int(line[1]))
-                    e.append(int(line[2]))
-                    v.append(val)
-                elif line[0] not in _chrs:
-                    if line[0] == '#': continue
-                    if line[0] == 'track': continue
+                bedchr = self._resolve_chr_name(line[0], _chrs, chr_alias)
+                if bedchr is None:
                     if line[0] not in skipchrs:
                         self.logger.warning("Chromosome in BEDGRAPH is not present in FASTA or not selected for plotting. Skipping it. BED line: {}".format("\t".join(line)))
                         skipchrs.append(line[0])
                     continue
+                if curchr == '':
+                    curchr = bedchr
+                    binv = np.zeros(ceil(chrlengths[0][1][curchr] / bw), dtype=int)
+                    s = deque([int(line[1])])
+                    e = deque([int(line[2])])
+                    v = deque([int(val)])
+                elif curchr == bedchr:
+                    s.append(int(line[1]))
+                    e.append(int(line[2]))
+                    v.append(val)
                 else:
-                    if line[0] in added_chrs:
+                    if bedchr in added_chrs:
                         self.logger.error("BedGraph file: {} is not sorted. For plotting tracks, sorted BedGraph file is required. Exiting.".format(self.f))
                         sys.exit()
 
@@ -736,7 +770,7 @@ class track():
                     bincnt[curchr] = deque([(bins[i], binv[i]) for i in range(len(bins))])
                     added_chrs.append(curchr)
                     # Set the new chromosome
-                    curchr = line[0]
+                    curchr = bedchr
                     binv = np.zeros(ceil(chrlengths[0][1][curchr]/bw), dtype=int)
                     s = deque([int(line[1])])
                     e = deque([int(line[2])])
@@ -1842,11 +1876,14 @@ def drawtracks(ax, tracks, s, chrgrps, chrlengths, v, itx, cfg, minl=0, maxl=-1)
                     chrpos = [k[0] if not itx else k[0] + rbuff[chrs[j]] for k in bedbin[chrs[j]]]
                     tpos = [k[1] for k in bedbin[chrs[j]]]
                 # print(cl, len(tpos))
-                tposmax = (max(tpos) if len(tpos) > 0 else 0) if cfg['norm'] == 'T' else globaltposmax
+                tposmax = (max(tpos) if len(tpos) > 0 else 0) if cfg['norm'] == 'T' else (globaltposmax if globaltposmax is not None else 0)
                 tvars = {'color': tracks[i].lc, 'lw': tracks[i].lw, 'zorder': 2, 'alpha': tracks[i].ta}
                 if not v:
                     y0 = cl - j - th*(ti) if not itx else 1 - th*(ti)
-                    ypos = [(t*diff/tposmax)+y0 for t in tpos] if len(tpos) > 0 else y0
+                    if len(tpos) > 0 and tposmax > 0:
+                        ypos = [(t*diff/tposmax)+y0 for t in tpos]
+                    else:
+                        ypos = [y0 for _ in tpos]
                     if tracks[i].tt == 'f':
                         ax.fill_between(chrpos, ypos, y0, **tvars)
                     elif tracks[i].tt == 'l':
@@ -1858,7 +1895,10 @@ def drawtracks(ax, tracks, s, chrgrps, chrlengths, v, itx, cfg, minl=0, maxl=-1)
                         ax.text(xpos, y0 + diff/2, tracks[i].n, color=tracks[i].nc, fontsize=tracks[i].ns, fontfamily=tracks[i].nf, ha='left', va='center', rotation='horizontal')
                 else:
                     x0 = j + (ti)*th - diff if not itx else (ti)*th - diff
-                    xpos = [x0 + diff - (t*diff/tposmax) for t in tpos] if len(tpos) > 0 else x0
+                    if len(tpos) > 0 and tposmax > 0:
+                        xpos = [x0 + diff - (t*diff/tposmax) for t in tpos]
+                    else:
+                        xpos = [x0 for _ in tpos]
                     if tracks[i].tt == 'f':
                         ax.fill_betweenx(chrpos, xpos, x0+diff, **tvars)
                     elif tracks[i].tt == 'l':
